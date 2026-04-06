@@ -831,16 +831,19 @@ class TomatoesStrategy(MarketMakingStrategy):
           on a stale quote (from round_5_all's KelpStrategy deflection mechanism).
     """
  
-    _TAKE_EDGE         = 1
+    _TAKE_EDGE         = 3 # PREV best: 3
     _MAKE_EDGE         = 1
-    _DEFLECT_THRESHOLD = 0.5   # ticks; fire on any move > half a tick
+    # PREV BEST: 1.5
+    _DEFLECT_THRESHOLD = 2   # ticks; fire on any move > half a tick: 0.5
  
     def __init__(self) -> None:
         super().__init__(TOMATOES, take_edge=self._TAKE_EDGE, make_edge=self._MAKE_EDGE)
         self.signal: Signal = Signal.NEUTRAL
         self.prev_fair: Optional[float] = None
  
-    def get_fair_value(self, ctx: ProductContext, state: TradingState) -> Optional[float]:
+    def get_fair_value(self, ctx: ProductContext, state: TradingState) -> Optional[float]:      
+        # TO-DO: maybe look at the volume and if not diff by best and highest --> use best, maybe also take into consideration of our remaining trading limits
+        #return ctx.mid_price()
         return ctx.wall_mid
  
     def act(self, ctx: ProductContext, state: TradingState) -> None:
