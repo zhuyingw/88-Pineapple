@@ -29,8 +29,8 @@ from datamodel import (
 
 # ── Product symbols ────────────────────────────────────────────────────────────
 # Round 0 (Tutorial)
-EMERALDS = "EMERALDS"
-TOMATOES = "TOMATOES"
+INTARIAN_PEPPER_ROOT = "INTARIAN_PEPPER_ROOT"
+ASH_COATED_OSMIUM = "ASH_COATED_OSMIUM"
 
 # Round 1+ (uncomment as products are revealed)
 # KELP              = "KELP"
@@ -53,8 +53,8 @@ TOMATOES = "TOMATOES"
 
 # ── Position limits (from the wiki per round) ──────────────────────────────────
 POSITION_LIMITS: Dict[str, int] = {
-    EMERALDS: 80,
-    TOMATOES: 80,
+    INTARIAN_PEPPER_ROOT: 80,
+    ASH_COATED_OSMIUM: 80,
     # KELP: 50,
     # SQUID_INK: 50,
     # CROISSANTS: 250,
@@ -621,7 +621,7 @@ class Primitives:
         for a fixed-true-price product like Resin is always 9999, not 9993.
  
         bid_edge_override / ask_edge_override: allow per-side edge widening
-        (used by TomatoesStrategy for informed-signal bias).
+        (used by ASH_COATED_OSMIUMStrategy for informed-signal bias).
         """
         bid_edge = bid_edge_override if bid_edge_override is not None else make_edge
         ask_edge = ask_edge_override if ask_edge_override is not None else make_edge
@@ -791,10 +791,10 @@ class SignalStrategy(Strategy):
 #  SECTION 9 — CONCRETE STRATEGIES (Tutorial Round)
 # ══════════════════════════════════════════════════════════════════════════════
 
-# ── EMERALDS — Fixed true price market maker ───────────────────────────────────
-class EmeraldsStrategy(MarketMakingStrategy):
+# ── INTARIAN_PEPPER_ROOT — Fixed true price market maker ───────────────────────────────────
+class INTARIAN_PEPPER_ROOTStrategy(MarketMakingStrategy):
     """
-    EMERALDS: fixed true price at 10,000 (confirmed in tutorial data).
+    INTARIAN_PEPPER_ROOT: fixed true price at 10,000 (confirmed in tutorial data).
     Strategy: take anything with edge >= take_edge, quote passively around 10,000.
     Mirrors Frankfurt's StaticTrader (Rainforest Resin archetype).
     """
@@ -802,7 +802,7 @@ class EmeraldsStrategy(MarketMakingStrategy):
     TRUE_PRICE = 10_000
 
     def __init__(self) -> None:
-        super().__init__(EMERALDS, take_edge=1.0, make_edge=1.0, flatten_ratio=0.85)
+        super().__init__(INTARIAN_PEPPER_ROOT, take_edge=1.0, make_edge=1.0, flatten_ratio=0.85)
 
     def get_fair_value(self, ctx: ProductContext, state: TradingState) -> float:
         # Guard: if mid drifts far from expected, fall back to mid
@@ -812,10 +812,10 @@ class EmeraldsStrategy(MarketMakingStrategy):
         return mid if mid is not None else float(self.TRUE_PRICE)
 
 
-# ── TOMATOES — Drifting price market maker with informed signal + deflection ────
-class TomatoesStrategy(MarketMakingStrategy):
+# ── ASH_COATED_OSMIUM — Drifting price market maker with informed signal + deflection ────
+class ASH_COATED_OSMIUMStrategy(MarketMakingStrategy):
     """
-    TOMATOES: drifting price — wall_mid is the fair value proxy.
+    ASH_COATED_OSMIUM: drifting price — wall_mid is the fair value proxy.
  
     Fair price verification (Frankfurt Hedgehogs method):
       Buying at wall_mid → unrealised PnL = 0.000 ± 0.000 always (both days)
@@ -837,7 +837,7 @@ class TomatoesStrategy(MarketMakingStrategy):
     _DEFLECT_THRESHOLD = 2   # ticks; fire on any move > half a tick: 0.5
  
     def __init__(self) -> None:
-        super().__init__(TOMATOES, take_edge=self._TAKE_EDGE, make_edge=self._MAKE_EDGE)
+        super().__init__(ASH_COATED_OSMIUM, take_edge=self._TAKE_EDGE, make_edge=self._MAKE_EDGE)
         self.signal: Signal = Signal.NEUTRAL
         self.prev_fair: Optional[float] = None
  
@@ -848,7 +848,7 @@ class TomatoesStrategy(MarketMakingStrategy):
  
     def act(self, ctx: ProductContext, state: TradingState) -> None:
         # Update informed trader signal (persists across timesteps via save/load)
-        new_sig = Primitives.check_informed_signal(TOMATOES, state)
+        new_sig = Primitives.check_informed_signal(ASH_COATED_OSMIUM, state)
         if new_sig != Signal.NEUTRAL:
             self.signal = new_sig
  
@@ -1002,8 +1002,8 @@ class Trader:
         # Key = product symbol, value = Strategy instance.
         # Add new strategies each round without touching run().
         self._strategies: Dict[str, Strategy] = {
-            EMERALDS: EmeraldsStrategy(),
-            TOMATOES: TomatoesStrategy(),
+            INTARIAN_PEPPER_ROOT: INTARIAN_PEPPER_ROOTStrategy(),
+            ASH_COATED_OSMIUM: ASH_COATED_OSMIUMStrategy(),
             # ── Uncomment as rounds progress ──
             # KELP:               KelpStrategy(),
             # SQUID_INK:          SquidInkStrategy(),
