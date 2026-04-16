@@ -1004,24 +1004,26 @@ class PepperRootStrategy(MarketMakingStrategy):
         if fv is None:
             return
 
-        # Deflection: only suppress BID (don't chase a momentary retrace)
-        # Never suppress ASK because we never post asks anyway
-        deflect_bid = False
-        if self.prev_fair is not None:
-            delta = fv - self.prev_fair
-            if delta < -self._DEFLECT_THRESHOLD:  # price dipped → defer buying
-                deflect_bid = True
-        self.prev_fair = fv
+        self.prev_fair = fv  # track for future use (deflection is a no-op on formula FV)
 
-        # ── 1. Takes: only buy when ask is well below fair value ──────────────
-        # Never take on the sell side (would reduce our long position)
-        for price, volume in sorted(ctx.sell_orders.items()):
-            if price > fv - self._TAKE_EDGE:
-                break
-            self.buy(price, volume)
+        # ── 1. Aggressive take: buy bot's ask to build position fast ──────────
+        # KEY INSIGHT: PEPPER_ROOT trends +1000/day. Every tick we're NOT at
+        # +80 lots costs us 0.1 SeaShells/lot in missed trend. Taking the bot
+        # ask at fv+6 costs 6 ticks but buys us potentially 100s of ticks of
+        # trend. Expected net benefit >> cost for any buy before halfway through day.
+        #
+        # We ALWAYS take the bot's ask (even above fv) to stay at max long.
+        # Exception: never take when already at position limit.
+        if ctx.position + self._buy_spent < POSITION_LIMITS.get(PEPPER_ROOT, 80):
+            for price, volume in sorted(ctx.sell_orders.items()):
+                remaining = POSITION_LIMITS.get(PEPPER_ROOT, 80) - ctx.position - self._buy_spent
+                if remaining <= 0:
+                    break
+                qty = min(volume, remaining)
+                if qty > 0:
+                    self.buy(price, qty)
 
         # ── 2. Zero-EV flush: buy at fair value if short ──────────────────────
-        # (rarely triggers but protects against edge cases)
         fv_int = int(fv)
         pos_after = ctx.position + self._buy_spent - self._sell_spent
         if pos_after < 0 and fv_int in self._book.sell_orders:
@@ -1029,13 +1031,12 @@ class PepperRootStrategy(MarketMakingStrategy):
             if qty > 0:
                 self.buy(fv_int, qty)
 
-        # ── 3. Passive bid only: fill up to position limit ────────────────────
-        # Never post a passive ask — we want to stay long all day
-        bid_edge: float = 100.0 if deflect_bid else float(self._MAKE_EDGE)
-
+        # ── 3. Passive bid: catch additional fill opportunities ───────────────
+        # Also post a passive bid at bot_bid+1 to catch sell-takers.
+        # This is redundant if we're already at +80 from the aggressive take above.
         remaining_buy = ctx.max_buy - self._buy_spent
-        if remaining_buy > 0 and bid_edge < 100.0:
-            max_bid = int(fv) - int(bid_edge)
+        if remaining_buy > 0:
+            max_bid = int(fv) - int(self._MAKE_EDGE)
             bid_price = max_bid
             for price in sorted(self._book.buy_orders.keys(), reverse=True):
                 if price < max_bid:
