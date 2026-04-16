@@ -88,7 +88,7 @@ POSITION_LIMITS: Dict[str, int] = {
     # **{s: 200 for s in OPTION_SYMBOLS},
     # MAGNIFICENT_MACARONS: 75,
 }
-DEFAULT_LIMIT = 50
+DEFAULT_LIMIT = 80
 
 # ── Informed trader ID (revealed in Round 5, but tracked from Round 1) ─────────
 INFORMED_TRADER = "Olivia"
