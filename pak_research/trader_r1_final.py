@@ -964,9 +964,8 @@ class PepperRootStrategy(MarketMakingStrategy):
     Backtest (CSV sim): ~230k/3 days vs ~207k symmetric, ~240k theoretical max
     """
 
-    _TAKE_EDGE         = 3      # conservative to avoid taking at bad prices
+    _TAKE_EDGE         = 1      # conservative to avoid taking at bad prices
     _MAKE_EDGE         = 1      # tight bid to stay long
-    _DEFLECT_THRESHOLD = 0.5    # standard; but only bid side matters here
     _DRIFT_PER_TICK    = 0.001  # 1 per 1000ms = 1000 per day (confirmed exact)
 
     def __init__(self) -> None:
@@ -1004,7 +1003,7 @@ class PepperRootStrategy(MarketMakingStrategy):
         if fv is None:
             return
 
-        self.prev_fair = fv  # track for future use (deflection is a no-op on formula FV)
+        self.prev_fair = fv
 
         # ── 1. Aggressive take: buy bot's ask to build position fast ──────────
         # KEY INSIGHT: PEPPER_ROOT trends +1000/day. Every tick we're NOT at
@@ -1082,7 +1081,7 @@ class OsmiumStrategy(MarketMakingStrategy):
     """
 
     TRUE_PRICE = 10_000
-    _TAKE_EDGE = 1      # ← tune on official backtester
+    _TAKE_EDGE = 2      # ← tune on official backtester
     _MAKE_EDGE = 1
 
     def __init__(self) -> None:
@@ -1097,6 +1096,7 @@ class OsmiumStrategy(MarketMakingStrategy):
         if wm is not None and abs(wm - self.TRUE_PRICE) < 10:
             return float(self.TRUE_PRICE)
         return wm if wm is not None else float(self.TRUE_PRICE)
+
 
 
 # ══════════════════════════════════════════════════════════════════════════════
