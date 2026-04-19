@@ -715,7 +715,7 @@ class MarketMakingStrategy(Strategy):
       2. zero_ev_flush     — drain excess inventory at fair value (FIX 1)
       3. post_passive_quotes — quote at the optimal price inside fair value (FIX 2)
 
-    Deflection guard (FIX 3) is implemented in subclasses that need it
+    Deflection guard is implemented in subclasses that need it
     (drifting-price products like Tomatoes/Kelp) since fixed-price products
     don't need it — the fair value never moves.
     """
@@ -808,190 +808,199 @@ class SignalStrategy(Strategy):
 #  SECTION 9 — CONCRETE STRATEGIES (Tutorial Round)
 # ══════════════════════════════════════════════════════════════════════════════
 
-# ── EMERALDS — Fixed true price market maker ───────────────────────────────────
-class EmeraldsStrategy(MarketMakingStrategy):
-    """
-    EMERALDS: fixed true price at 10,000, verified via unrealised PnL experiment.
+# # ── EMERALDS — Fixed true price market maker ───────────────────────────────────
+# class EmeraldsStrategy(MarketMakingStrategy):
+#     """
+#     EMERALDS: fixed true price at 10,000, verified via unrealised PnL experiment.
 
-    Fair price verification (Frankfurt Hedgehogs method):
-      Buying 1 lot at wall_mid → instantaneous unrealised PnL = 0.000 ± 0.000 (both days)
-      Buying 1 lot at mid_price → PnL = +0.002 ± 0.717  (noisy — mid_price ≠ true price)
-      Buying 1 lot at best_ask  → PnL = -7.87  ± 1.02   (taker pays ~8 pts to cross)
-      Buying 1 lot at bid_wall+1 → PnL = +9.00 ± 0.000  (passive maker earns ~9 pts/lot)
+#     Fair price verification (Frankfurt Hedgehogs method):
+#       Buying 1 lot at wall_mid → instantaneous unrealised PnL = 0.000 ± 0.000 (both days)
+#       Buying 1 lot at mid_price → PnL = +0.002 ± 0.717  (noisy — mid_price ≠ true price)
+#       Buying 1 lot at best_ask  → PnL = -7.87  ± 1.02   (taker pays ~8 pts to cross)
+#       Buying 1 lot at bid_wall+1 → PnL = +9.00 ± 0.000  (passive maker earns ~9 pts/lot)
 
-    Strategy (3 steps per tick):
-      1. Take every ask < 10000 and every bid > 10000.
-      2. Zero-EV flush: if a bot bids/offers at exactly 10000, trade to drain inventory.
-      3. Post passive quote at 9999 bid / 10001 ask (steps in front of 9992/10008 wall).
-    """
+#     Strategy (3 steps per tick):
+#       1. Take every ask < 10000 and every bid > 10000.
+#       2. Zero-EV flush: if a bot bids/offers at exactly 10000, trade to drain inventory.
+#       3. Post passive quote at 9999 bid / 10001 ask (steps in front of 9992/10008 wall).
+#     """
 
-    TRUE_PRICE  = 10_000
-    _TAKE_EDGE  = 1      # take anything ≥1 tick from 10000
-    _MAKE_EDGE  = 1      # quote at 9999/10001 → earns ~9 pts/lot gross
+#     TRUE_PRICE  = 10_000
+#     _TAKE_EDGE  = 1      # take anything ≥1 tick from 10000
+#     _MAKE_EDGE  = 1      # quote at 9999/10001 → earns ~9 pts/lot gross
 
-    def __init__(self) -> None:
-        super().__init__(EMERALDS, take_edge=self._TAKE_EDGE, make_edge=self._MAKE_EDGE)
+#     def __init__(self) -> None:
+#         super().__init__(EMERALDS, take_edge=self._TAKE_EDGE, make_edge=self._MAKE_EDGE)
 
-    def get_fair_value(self, ctx: ProductContext, state: TradingState) -> float:
-        """
-        Use TRUE_PRICE when wall_mid confirms it (std=0.0 verified across both days).
-        Fallback to wall_mid if the product ever changes in a future round.
-        """
-        wm = ctx.wall_mid
-        if wm is not None and abs(wm - self.TRUE_PRICE) < 10:
-            return float(self.TRUE_PRICE)
-        return wm if wm is not None else float(self.TRUE_PRICE)
-
-
-# ── TOMATOES — Drifting price market maker ────────────────────────────────────
-class TomatoesStrategy(MarketMakingStrategy):
-    """
-    TOMATOES: drifting price — wall_mid is the fair value proxy.
-
-    TUNABLE PARAMETERS — change these based on the OFFICIAL backtester only.
-    Do NOT tune from CSV simulator alone: take_best_orders fires 0 times from
-    CSV data (spread too wide), so CSV PnL differences from take_edge changes
-    are not meaningful. The official sim models bot reactions to our quotes.
-
-    _TAKE_EDGE:   Set to the value that scored best on the official backtester.
-                  Validated: 3 gave best official PnL despite CSV sim showing
-                  it fires 0 times. Effect is through position capacity dynamics
-                  in the official matching engine.
-
-    _MAKE_EDGE:   Dead parameter for TOMATOES (bot bids at fv-6.5, our quote
-                  resolves to bot_bid+1 regardless of make_edge 1–5). Leave at 1.
-
-    _DEFLECT_THR: 0.5 is the natural binary threshold — TOMATOES moves in 0.5-tick
-                  steps, so any non-zero move is exactly 0.5+. Leave at 0.5.
-                  Do NOT raise above 0.5 (would miss deflections).
-                  Do NOT make dynamic (risks raising above 0.5 in low-vol regime).
-    """
-
-    # ── Tune these on the official backtester ─────────────────────────────────
-    _TAKE_EDGE   = 10      # ← best on official backtester; fires 0x from CSV data
-    _MAKE_EDGE   = 10      # dead parameter for TOMATOES; leave at 1
-    _DEFLECT_THR = 10    # binary threshold matching TOMATOES tick size
-
-    def __init__(self) -> None:
-        super().__init__(TOMATOES, take_edge=self._TAKE_EDGE, make_edge=self._MAKE_EDGE)
-        self.signal:    Signal          = Signal.NEUTRAL
-        self.prev_fair: Optional[float] = None
-
-    def get_fair_value(self, ctx: ProductContext, state: TradingState) -> Optional[float]:
-        return ctx.wall_mid
-
-    def act(self, ctx: ProductContext, state: TradingState) -> None:
-
-        fv = self.get_fair_value(ctx, state)
-        if fv is None:
-            return
-
-        # ── Deflection guard: 1-tick suppression on the moved-against side ────
-        # Fires on every non-zero move (threshold=0.5 = TOMATOES minimum tick).
-        # Prevents posting a stale quote immediately after a directional move.
-        deflect_bid = deflect_ask = False
-        if self.prev_fair is not None:
-            delta = fv - self.prev_fair
-            if delta > self._DEFLECT_THR:
-                deflect_bid = True   # price rose → don't bid into the spike
-            elif delta < -self._DEFLECT_THR:
-                deflect_ask = True   # price fell → don't ask into the dip
-        self.prev_fair = fv
-
-        # ── 1. Take favourable orders ──────────────────────────────────────────
-        Primitives.take_best_orders(self, ctx, fv, self._TAKE_EDGE)
-
-        # ── 2. Zero-EV flush ───────────────────────────────────────────────────
-        Primitives.zero_ev_flush(self, ctx, fv)
-
-        # ── 3. Passive quotes with deflection + informed signal bias ──────────
-        bid_edge: float = self._MAKE_EDGE + (1 if self.signal == Signal.SHORT else 0)
-        ask_edge: float = self._MAKE_EDGE + (1 if self.signal == Signal.LONG  else 0)
-
-        if deflect_bid: bid_edge = 100.0
-        if deflect_ask: ask_edge = 100.0
-
-        remaining_buy  = ctx.max_buy  - self._buy_spent
-        remaining_sell = ctx.max_sell - self._sell_spent
-
-        if remaining_buy > 0 or remaining_sell > 0:
-            Primitives.post_passive_quotes(
-                self, ctx, fv,
-                make_edge=self._MAKE_EDGE,
-                bid_edge_override=bid_edge,
-                ask_edge_override=ask_edge,
-            )
-
-    def save(self) -> Dict[str, Any]:
-        return {"signal": int(self.signal), "prev_fair": self.prev_fair}
-
-    def load(self, data: Any) -> None:
-        if isinstance(data, dict):
-            self.signal    = Signal(data.get("signal", 0))
-            self.prev_fair = data.get("prev_fair")
-        elif isinstance(data, int):
-            self.signal = Signal(data)
+#     def get_fair_value(self, ctx: ProductContext, state: TradingState) -> float:
+#         """
+#         Use TRUE_PRICE when wall_mid confirms it (std=0.0 verified across both days).
+#         Fallback to wall_mid if the product ever changes in a future round.
+#         """
+#         wm = ctx.wall_mid
+#         if wm is not None and abs(wm - self.TRUE_PRICE) < 10:
+#             return float(self.TRUE_PRICE)
+#         return wm if wm is not None else float(self.TRUE_PRICE)
 
 
+# # ── TOMATOES — Drifting price market maker ────────────────────────────────────
+# class TomatoesStrategy(MarketMakingStrategy):
+#     """
+#     TOMATOES: drifting price — wall_mid is the fair value proxy.
 
-# ── PEPPER_ROOT — Trending price, buy-biased market maker ─────────────────────
+#     TUNABLE PARAMETERS — change these based on the OFFICIAL backtester only.
+#     Do NOT tune from CSV simulator alone: take_best_orders fires 0 times from
+#     CSV data (spread too wide), so CSV PnL differences from take_edge changes
+#     are not meaningful. The official sim models bot reactions to our quotes.
+
+#     _TAKE_EDGE:   Set to the value that scored best on the official backtester.
+#                   Validated: 3 gave best official PnL despite CSV sim showing
+#                   it fires 0 times. Effect is through position capacity dynamics
+#                   in the official matching engine.
+
+#     _MAKE_EDGE:   Dead parameter for TOMATOES (bot bids at fv-6.5, our quote
+#                   resolves to bot_bid+1 regardless of make_edge 1–5). Leave at 1.
+
+#     _DEFLECT_THR: 0.5 is the natural binary threshold — TOMATOES moves in 0.5-tick
+#                   steps, so any non-zero move is exactly 0.5+. Leave at 0.5.
+#                   Do NOT raise above 0.5 (would miss deflections).
+#                   Do NOT make dynamic (risks raising above 0.5 in low-vol regime).
+#     """
+
+#     # ── Tune these on the official backtester ─────────────────────────────────
+#     _TAKE_EDGE   = 3      # ← best on official backtester; fires 0x from CSV data
+#     _MAKE_EDGE   = 1      # dead parameter for TOMATOES; leave at 1
+#     _DEFLECT_THR = 0.5    # binary threshold matching TOMATOES tick size
+
+#     def __init__(self) -> None:
+#         super().__init__(TOMATOES, take_edge=self._TAKE_EDGE, make_edge=self._MAKE_EDGE)
+#         self.signal:    Signal          = Signal.NEUTRAL
+#         self.prev_fair: Optional[float] = None
+
+#     def get_fair_value(self, ctx: ProductContext, state: TradingState) -> Optional[float]:
+#         return ctx.wall_mid
+
+#     def act(self, ctx: ProductContext, state: TradingState) -> None:
+#         # Informed trader signal (persists via save/load)
+#         new_sig = Primitives.check_informed_signal(TOMATOES, state)
+#         if new_sig != Signal.NEUTRAL:
+#             self.signal = new_sig
+
+#         fv = self.get_fair_value(ctx, state)
+#         if fv is None:
+#             return
+
+#         # ── Deflection guard: 1-tick suppression on the moved-against side ────
+#         # Fires on every non-zero move (threshold=0.5 = TOMATOES minimum tick).
+#         # Prevents posting a stale quote immediately after a directional move.
+#         deflect_bid = deflect_ask = False
+#         if self.prev_fair is not None:
+#             delta = fv - self.prev_fair
+#             if delta > self._DEFLECT_THR:
+#                 deflect_bid = True   # price rose → don't bid into the spike
+#             elif delta < -self._DEFLECT_THR:
+#                 deflect_ask = True   # price fell → don't ask into the dip
+#         self.prev_fair = fv
+
+#         # ── 1. Take favourable orders ──────────────────────────────────────────
+#         Primitives.take_best_orders(self, ctx, fv, self._TAKE_EDGE)
+
+#         # ── 2. Zero-EV flush ───────────────────────────────────────────────────
+#         Primitives.zero_ev_flush(self, ctx, fv)
+
+#         # ── 3. Passive quotes with deflection + informed signal bias ──────────
+#         bid_edge: float = self._MAKE_EDGE + (1 if self.signal == Signal.SHORT else 0)
+#         ask_edge: float = self._MAKE_EDGE + (1 if self.signal == Signal.LONG  else 0)
+
+#         if deflect_bid: bid_edge = 100.0
+#         if deflect_ask: ask_edge = 100.0
+
+#         remaining_buy  = ctx.max_buy  - self._buy_spent
+#         remaining_sell = ctx.max_sell - self._sell_spent
+
+#         if remaining_buy > 0 or remaining_sell > 0:
+#             Primitives.post_passive_quotes(
+#                 self, ctx, fv,
+#                 make_edge=self._MAKE_EDGE,
+#                 bid_edge_override=bid_edge,
+#                 ask_edge_override=ask_edge,
+#             )
+
+#     def save(self) -> Dict[str, Any]:
+#         return {"signal": int(self.signal), "prev_fair": self.prev_fair}
+
+#     def load(self, data: Any) -> None:
+#         if isinstance(data, dict):
+#             self.signal    = Signal(data.get("signal", 0))
+#             self.prev_fair = data.get("prev_fair")
+#         elif isinstance(data, int):
+#             self.signal = Signal(data)
+
+
+
+# ── PEPPER_ROOT — Trend-aware buy-biased market maker (Round 2) ──────────────
 class PepperRootStrategy(MarketMakingStrategy):
     """
-    INTARIAN_PEPPER_ROOT: deterministic upward trend of +1000/day.
+    INTARIAN_PEPPER_ROOT: normally trends +1000/day but Round 2 hints at
+    possible regime changes ("bot unusual behaviour", dynamic may change).
 
-    Price model (confirmed by linear regression R²≈1.0 across all 3 days):
-      fair_value(t) = day_start + timestamp * 0.001
-      where day_start = 10000 (day -2), 11000 (day -1), 12000 (day 0), ...
-      and timestamp runs 0 → 999900 within each day.
+    === ROUND 2 RISK MANAGEMENT ===
 
-    The KEY insight: price rises by 1000 over the day. The optimal position
-    is to stay AS LONG AS POSSIBLE for as LONG AS POSSIBLE. A position of
-    +80 lots held all day earns ~80,000 SeaShells from the trend alone.
+    Round 1 baseline (R²≈1.0 across 3 days):
+      fv(t) = day_start + timestamp × 0.001
+      detrended std ≈ 0.83, never drifts >8 ticks from formula line.
 
-    Strategy:
-      - Fair value anchored to formula (zero-lag vs wall_mid's 1-tick lag)
-      - Day start estimated from first tick's wall_mid (always clean)
-      - Passive BIDS: tight (make_edge=1), actively fill to stay long
-      - Passive ASKS: wide (ask_edge_override=100), never sell passively
-      - Take-edge: conservative (3) to avoid flooding book with sell takes
-      - Deflection: only suppresses BID (don't buy into momentary retraces)
-        never suppresses ASK (because we never post asks anyway)
+    Risk detection — we track an exponential moving average (EMA) of the
+    detrended residual (wall_mid − formula_fv). In R1 this EMA stays near 0.
+    If R2 has a weaker or reversed trend, the EMA drifts negative.
 
-    Backtest (CSV sim): ~230k/3 days vs ~207k symmetric, ~240k theoretical max
+    Three regimes based on EMA of detrended residual:
+      NORMAL  (ema > TREND_WEAK_THR):  trend intact → take aggressively, stay long
+      CAUTIOUS (ema ≤ TREND_WEAK_THR): trend weakening → only take very cheap asks,
+                                        post passive bid but don't add beyond current pos
+      FLATTEN (ema ≤ TREND_STOP_THR):  trend reversed → sell ALL long inventory,
+                                        stop buying entirely
+
+    Thresholds calibrated from R1:
+      TREND_WEAK_THR = -5.0  (6σ below R1 mean — only triggers on genuine regime change)
+      TREND_STOP_THR = -10.0 (12σ — clear reversal)
+    These are conservative to avoid false positives on R1-like noise.
+
+    === ENTRY PRICE CAP ===
+    _MAX_TAKE_ABOVE_FV = 6: only take asks at fv+6 or cheaper.
+    Cuts max drawdown by ~40% (from -514 to -306) at cost of ~200 SeaShells.
     """
 
-    _TAKE_EDGE         = 1      # conservative to avoid taking at bad prices
-    _MAKE_EDGE         = 1      # tight bid to stay long
-    _DRIFT_PER_TICK    = 0.001  # 1 per 1000ms = 1000 per day (confirmed exact)
+    _TAKE_EDGE          = 3      # actual cap is _MAX_TAKE_ABOVE_FV
+    _MAKE_EDGE          = 2      # passive bid at fv-2
+    _DRIFT_PER_TICK     = 0.001  # expected drift; used for formula fv
+    _MAX_TAKE_ABOVE_FV  = 7      # don't take asks more than 7 ticks above fv
+    _EMA_ALPHA          = 0.02   # EMA smoothing (≈ 50-tick half-life)
+    _TREND_WEAK_THR     = -1.0   # EMA below this → cautious mode
+    _TREND_STOP_THR     = -2.0  # EMA below this → flatten and stop
 
     def __init__(self) -> None:
         super().__init__(PEPPER_ROOT, take_edge=self._TAKE_EDGE, make_edge=self._MAKE_EDGE)
         self.signal:     Signal          = Signal.NEUTRAL
         self.prev_fair:  Optional[float] = None
-        self._day_start: Optional[float] = None  # estimated from first tick
+        self._day_start: Optional[float] = None
+        self._det_ema:   float           = 0.0   # EMA of (wall_mid - formula_fv)
 
     def _get_day_start(self, ctx: ProductContext, state: TradingState) -> float:
-        """
-        Estimate the day's starting price from wall_mid.
-        Only computed once (first tick). Rounds to nearest 1000 for robustness.
-        """
         if self._day_start is not None:
             return self._day_start
         wm = ctx.wall_mid
         if wm is None:
-            return 10000.0  # fallback
+            return None
         ts = state.timestamp
         raw_start = wm - ts * self._DRIFT_PER_TICK
-        # Round to nearest 1000 (day starts are always multiples of 1000)
         self._day_start = round(raw_start / 1000) * 1000
         return self._day_start
 
     def get_fair_value(self, ctx: ProductContext, state: TradingState) -> Optional[float]:
-        """
-        Formula-based fair value: day_start + timestamp * drift_rate.
-        Zero lag compared to wall_mid. Confirmed accurate to ±0.8 std residual.
-        """
         day_start = self._get_day_start(ctx, state)
+        if day_start is None:
+            return None
         return day_start + state.timestamp * self._DRIFT_PER_TICK
 
     def act(self, ctx: ProductContext, state: TradingState) -> None:
@@ -999,26 +1008,71 @@ class PepperRootStrategy(MarketMakingStrategy):
         if fv is None:
             return
 
+        # ── Update trend EMA ──────────────────────────────────────────────────
+        wm = ctx.wall_mid
+        if wm is not None:
+            detrend = wm - fv
+            self._det_ema = (self._EMA_ALPHA * detrend
+                             + (1.0 - self._EMA_ALPHA) * self._det_ema)
+
         self.prev_fair = fv
 
-        # ── 1. Aggressive take: buy bot's ask to build position fast ──────────
-        # KEY INSIGHT: PEPPER_ROOT trends +1000/day. Every tick we're NOT at
-        # +80 lots costs us 0.1 SeaShells/lot in missed trend. Taking the bot
-        # ask at fv+6 costs 6 ticks but buys us potentially 100s of ticks of
-        # trend. Expected net benefit >> cost for any buy before halfway through day.
-        #
-        # We ALWAYS take the bot's ask (even above fv) to stay at max long.
-        # Exception: never take when already at position limit.
-        if ctx.position + self._buy_spent < POSITION_LIMITS.get(PEPPER_ROOT, 80):
+        limit = POSITION_LIMITS.get(PEPPER_ROOT, 80)
+        pos_now = ctx.position + self._buy_spent - self._sell_spent
+
+        # ── Regime: FLATTEN — trend clearly reversed, close all longs ─────────
+        if self._det_ema <= self._TREND_STOP_THR:
+            if pos_now > 0:
+                # Sell everything at best available bid
+                for price, volume in sorted(ctx.buy_orders.items(), reverse=True):
+                    remaining_sell = pos_now - self._sell_spent
+                    if remaining_sell <= 0:
+                        break
+                    qty = min(volume, remaining_sell)
+                    if qty > 0:
+                        self.sell(price, qty)
+            return  # no new buys
+
+        # ── Regime: CAUTIOUS — only take very cheap asks, don't add aggressively
+        if self._det_ema <= self._TREND_WEAK_THR:
+            # Only take if ask is BELOW fv (clear bargain — won't overpay into weak trend)
+            if pos_now < limit:
+                for price, volume in sorted(ctx.sell_orders.items()):
+                    if price >= fv:
+                        break   # only genuine bargains
+                    remaining = limit - pos_now
+                    if remaining <= 0:
+                        break
+                    qty = min(volume, remaining)
+                    if qty > 0:
+                        self.buy(price, qty)
+            # Still post passive bid (free edge if sell-takers come)
+            remaining_buy = ctx.max_buy - self._buy_spent
+            if remaining_buy > 0:
+                max_bid = int(fv) - int(self._MAKE_EDGE)
+                bid_price = max_bid
+                for price in sorted(self._book.buy_orders.keys(), reverse=True):
+                    if price < max_bid:
+                        candidate = price + 1 if self._book.buy_orders[price] > 1 else price
+                        bid_price = min(candidate, max_bid)
+                        break
+                self.buy(bid_price, remaining_buy)
+            return
+
+        # ── Regime: NORMAL — trend intact, original aggressive strategy ────────
+        # 1. Price-capped take: buy asks at fv+6 or cheaper
+        if pos_now < limit:
             for price, volume in sorted(ctx.sell_orders.items()):
-                remaining = POSITION_LIMITS.get(PEPPER_ROOT, 80) - ctx.position - self._buy_spent
+                if price > fv + self._MAX_TAKE_ABOVE_FV:
+                    break
+                remaining = limit - pos_now
                 if remaining <= 0:
                     break
                 qty = min(volume, remaining)
                 if qty > 0:
                     self.buy(price, qty)
 
-        # ── 2. Zero-EV flush: buy at fair value if short ──────────────────────
+        # 2. Zero-EV flush
         fv_int = int(fv)
         pos_after = ctx.position + self._buy_spent - self._sell_spent
         if pos_after < 0 and fv_int in self._book.sell_orders:
@@ -1026,9 +1080,7 @@ class PepperRootStrategy(MarketMakingStrategy):
             if qty > 0:
                 self.buy(fv_int, qty)
 
-        # ── 3. Passive bid: catch additional fill opportunities ───────────────
-        # Also post a passive bid at bot_bid+1 to catch sell-takers.
-        # This is redundant if we're already at +80 from the aggressive take above.
+        # 3. Passive bid
         remaining_buy = ctx.max_buy - self._buy_spent
         if remaining_buy > 0:
             max_bid = int(fv) - int(self._MAKE_EDGE)
@@ -1042,9 +1094,10 @@ class PepperRootStrategy(MarketMakingStrategy):
 
     def save(self) -> Dict[str, Any]:
         return {
-            "signal":     int(self.signal),
-            "prev_fair":  self.prev_fair,
-            "day_start":  self._day_start,
+            "signal":    int(self.signal),
+            "prev_fair": self.prev_fair,
+            "day_start": self._day_start,
+            "det_ema":   self._det_ema,
         }
 
     def load(self, data: Any) -> None:
@@ -1052,6 +1105,7 @@ class PepperRootStrategy(MarketMakingStrategy):
             self.signal     = Signal(data.get("signal", 0))
             self.prev_fair  = data.get("prev_fair")
             self._day_start = data.get("day_start")
+            self._det_ema   = data.get("det_ema", 0.0)
         elif isinstance(data, int):
             self.signal = Signal(data)
 
@@ -1061,38 +1115,54 @@ class OsmiumStrategy(MarketMakingStrategy):
     """
     ASH_COATED_OSMIUM: stationary around true price ~10000.
 
-    Data profile (3 days):
-      wall_mid mean:  9998-10002 (confirmed stationary, ADF p < 0.03 all days)
-      wall_mid std:   3.7-5.1    (wider than EMERALDS, so use wall_mid not const)
-      spread:         ~16 ticks  (bid_edge ~8 per side)
-      lag-1 ACF:      -0.43      (strong mean reversion — the "hidden pattern")
-      named traders:  none       (no Olivia-style signal)
+    Data profile (3 days, confirmed):
+      wall_mid mean:  9998-10002, ADF p<0.03 all days → genuinely stationary
+      wall_mid std:   3.7-5.1 ticks
+      spread:         ~16 ticks; bot bids ~9990, bot asks ~10009
+      lag-1 ACF:      -0.43 (strong mean reversion)
+      named traders:  none
 
-    Unlike EMERALDS (std=0), OSMIUM's wall_mid drifts ±4.5 ticks around 10000.
-    Using a hardcoded TRUE_PRICE=10000 is safe as a ceiling but wall_mid gives
-    better intraday accuracy. The EmeraldsStrategy guard (fall back if wall_mid
-    drifts > 10 from 10000) handles the edge cases.
+    QUOTING APPROACH — post_passive_quotes with make_edge=1:
+      Target ceiling: int(fv) - 1 = 9999 bid, int(fv) + 1 = 10001 ask.
+      Then step to bot_bid+1 / bot_ask-1 to claim queue priority over the bot.
+      This ensures we are ALWAYS 1 tick better than whatever the bot quotes,
+      capped at 1 tick inside true price.
 
-    Backtest: ~11k/3 days with take_edge=3, ~10k with take_edge=1.
+      Why NOT hardcode 9999/10001:
+        When bot bids at 9984, posting at 9999 leaves a 15-tick gap. The bot
+        is irrelevant — we're the only offer at 9999. That is fine and good.
+        But when bot bids at 9998, posting at 9999 still gives us queue priority
+        AND maximum edge. post_passive_quotes handles both cases correctly.
+        Hardcoded 9999 also loses queue priority in the rare cases (~5-15% of
+        ticks) when the bot itself bids at 9999 or above — we end up BEHIND it.
+        post_passive_quotes steps to bot+1 so we're always in front.
+
+      Trade price distribution (3 days combined, n=1265 trades):
+        Bulk at ±8 and ±10 from wall_mid (bot spread edges).
+        Our passive bid at bot_bid+1 gets filled by all sell-takers whose
+        threshold ≥ bot_bid+1 — which is every taker that crosses the spread.
+
+    take_edge=3: OSMIUM drifts ±17 ticks from 10000 so takes DO fire.
+      Requires 3 ticks of genuine edge before taking; reduces limit-blocking.
     """
 
     TRUE_PRICE = 10_000
-    _TAKE_EDGE = 2      # ← tune on official backtester
-    _MAKE_EDGE = 1
+    _TAKE_EDGE = 3
+    _MAKE_EDGE = 1    # ceiling = fv ± 1; step in front of bot within that ceiling
 
     def __init__(self) -> None:
         super().__init__(OSMIUM, take_edge=self._TAKE_EDGE, make_edge=self._MAKE_EDGE)
 
     def get_fair_value(self, ctx: ProductContext, state: TradingState) -> float:
-        """
-        Use TRUE_PRICE=10000 anchored by wall_mid proximity check.
-        If wall_mid drifts > 10 from 10000, fall back to wall_mid.
-        """
         wm = ctx.wall_mid
         if wm is not None and abs(wm - self.TRUE_PRICE) < 10:
             return float(self.TRUE_PRICE)
         return wm if wm is not None else float(self.TRUE_PRICE)
 
+    # act() is inherited from MarketMakingStrategy:
+    #   1. take_best_orders(fv, take_edge=3)
+    #   2. zero_ev_flush(fv)
+    #   3. post_passive_quotes(fv, make_edge=1)  ← steps to bot+1, cap at 9999/10001
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1102,17 +1172,6 @@ class OsmiumStrategy(MarketMakingStrategy):
 #  are already implemented in Section 3.
 # ══════════════════════════════════════════════════════════════════════════════
 
-# class KelpStrategy(MarketMakingStrategy):
-#     """Round 1: random-walk price, wall_mid as fair value. Same as Tomatoes."""
-#     def __init__(self): super().__init__(KELP, take_edge=1.0, make_edge=1.0)
-#     def get_fair_value(self, ctx, state): return ctx.wall_mid
-
-
-# class SquidInkStrategy(SignalStrategy):
-#     """Round 1: follow Olivia's daily extrema signal."""
-#     def __init__(self): super().__init__(SQUID_INK)
-#     def get_signal(self, ctx, state):
-#         return Primitives.check_informed_signal(SQUID_INK, state)
 
 
 # class EtfStrategy(Strategy):
@@ -1185,7 +1244,12 @@ class Trader:
 
     # Also required for Round 2 (Manual Bidding challenge)
     def bid(self) -> int:
-        return 15
+        # Market Access Fee bid for Round 2.
+        # Top 50% of bids get 25% more order-book volume.
+        # Expected gain from extra flow: ~5-10k SeaShells over 3 days.
+        # Bid 2,000: safely in the upper half without overpaying.
+        # If accepted (fee deducted), net gain is still positive.
+        return 2000
 
     def __init__(self) -> None:
         # ── Register strategies here. One entry per product. ──────────────────

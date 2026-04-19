@@ -868,9 +868,9 @@ class TomatoesStrategy(MarketMakingStrategy):
     """
 
     # ── Tune these on the official backtester ─────────────────────────────────
-    _TAKE_EDGE   = 3      # ← best on official backtester; fires 0x from CSV data
-    _MAKE_EDGE   = 1      # dead parameter for TOMATOES; leave at 1
-    _DEFLECT_THR = 0.5    # binary threshold matching TOMATOES tick size
+    _TAKE_EDGE   = 10      # ← best on official backtester; fires 0x from CSV data
+    _MAKE_EDGE   = 10      # dead parameter for TOMATOES; leave at 1
+    _DEFLECT_THR = 10    # binary threshold matching TOMATOES tick size
 
     def __init__(self) -> None:
         super().__init__(TOMATOES, take_edge=self._TAKE_EDGE, make_edge=self._MAKE_EDGE)
@@ -881,10 +881,6 @@ class TomatoesStrategy(MarketMakingStrategy):
         return ctx.wall_mid
 
     def act(self, ctx: ProductContext, state: TradingState) -> None:
-        # Informed trader signal (persists via save/load)
-        new_sig = Primitives.check_informed_signal(TOMATOES, state)
-        if new_sig != Signal.NEUTRAL:
-            self.signal = new_sig
 
         fv = self.get_fair_value(ctx, state)
         if fv is None:
@@ -964,9 +960,8 @@ class PepperRootStrategy(MarketMakingStrategy):
     Backtest (CSV sim): ~230k/3 days vs ~207k symmetric, ~240k theoretical max
     """
 
-    _TAKE_EDGE         = 3      # conservative to avoid taking at bad prices
+    _TAKE_EDGE         = 1      # conservative to avoid taking at bad prices
     _MAKE_EDGE         = 1      # tight bid to stay long
-    _DEFLECT_THRESHOLD = 0.5    # standard; but only bid side matters here
     _DRIFT_PER_TICK    = 0.001  # 1 per 1000ms = 1000 per day (confirmed exact)
 
     def __init__(self) -> None:
@@ -1004,7 +999,7 @@ class PepperRootStrategy(MarketMakingStrategy):
         if fv is None:
             return
 
-        self.prev_fair = fv  # track for future use (deflection is a no-op on formula FV)
+        self.prev_fair = fv
 
         # ── 1. Aggressive take: buy bot's ask to build position fast ──────────
         # KEY INSIGHT: PEPPER_ROOT trends +1000/day. Every tick we're NOT at
@@ -1068,52 +1063,36 @@ class OsmiumStrategy(MarketMakingStrategy):
 
     Data profile (3 days):
       wall_mid mean:  9998-10002 (confirmed stationary, ADF p < 0.03 all days)
-      wall_mid std:   3.7-5.1
-      spread:         ~16 ticks, bot bids ~9990, bot asks ~10009
+      wall_mid std:   3.7-5.1    (wider than EMERALDS, so use wall_mid not const)
+      spread:         ~16 ticks  (bid_edge ~8 per side)
       lag-1 ACF:      -0.43      (strong mean reversion — the "hidden pattern")
-      named traders:  none
+      named traders:  none       (no Olivia-style signal)
 
-    WHY HARDCODE 9999/10001 (critical for official backtester):
-      The normal post_passive_quotes steps to bot_bid+1 ≈ 9991.
-      The official sim has bots whose sell threshold is ~9997-9999; they fill us
-      at 9999 but NOT at 9991. Hardcoding matches round_5_all's pos_ev design.
-      This should close the ~3k gap vs the community's 11k result.
+    Unlike EMERALDS (std=0), OSMIUM's wall_mid drifts ±4.5 ticks around 10000.
+    Using a hardcoded TRUE_PRICE=10000 is safe as a ceiling but wall_mid gives
+    better intraday accuracy. The EmeraldsStrategy guard (fall back if wall_mid
+    drifts > 10 from 10000) handles the edge cases.
 
-    Take edge = 3: OSMIUM price drifts ±17 ticks from 10000 so takes DO fire.
-      take_edge=3 requires real edge before taking, keeps position lean.
+    Backtest: ~11k/3 days with take_edge=3, ~10k with take_edge=1.
     """
 
-    TRUE_PRICE  = 10_000
-    POS_EV_BID  = 9_999    # hardcoded 1 tick inside true price
-    POS_EV_ASK  = 10_001   # hardcoded 1 tick inside true price
-    _TAKE_EDGE  = 3        # tune on official backtester
+    TRUE_PRICE = 10_000
+    _TAKE_EDGE = 2      # ← tune on official backtester
+    _MAKE_EDGE = 1
 
     def __init__(self) -> None:
-        super().__init__(OSMIUM, take_edge=self._TAKE_EDGE, make_edge=1)
+        super().__init__(OSMIUM, take_edge=self._TAKE_EDGE, make_edge=self._MAKE_EDGE)
 
     def get_fair_value(self, ctx: ProductContext, state: TradingState) -> float:
+        """
+        Use TRUE_PRICE=10000 anchored by wall_mid proximity check.
+        If wall_mid drifts > 10 from 10000, fall back to wall_mid.
+        """
         wm = ctx.wall_mid
         if wm is not None and abs(wm - self.TRUE_PRICE) < 10:
             return float(self.TRUE_PRICE)
         return wm if wm is not None else float(self.TRUE_PRICE)
 
-    def act(self, ctx: ProductContext, state: TradingState) -> None:
-        fv = self.get_fair_value(ctx, state)
-
-        # 1. Take aggressively when price drifts from true price
-        Primitives.take_best_orders(self, ctx, fv, self._TAKE_EDGE)
-
-        # 2. Zero-EV flush
-        Primitives.zero_ev_flush(self, ctx, fv)
-
-        # 3. Passive quotes hardcoded at 9999/10001 — NOT bot_bid+1 (~9991)
-        #    Bots whose sell threshold is 9997-9999 will fill us at 9999
-        #    but would skip us entirely at 9991. This is the key fill-rate fix.
-        remaining_buy  = ctx.max_buy  - self._buy_spent
-        remaining_sell = ctx.max_sell - self._sell_spent
-
-        if remaining_buy  > 0: self.buy (self.POS_EV_BID, remaining_buy)
-        if remaining_sell > 0: self.sell(self.POS_EV_ASK, remaining_sell)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1213,9 +1192,7 @@ class Trader:
         # Key = product symbol, value = Strategy instance.
         # Add new strategies each round without touching run().
         self._strategies: Dict[str, Strategy] = {
-            EMERALDS:    EmeraldsStrategy(),
-            TOMATOES:    TomatoesStrategy(),
-            PEPPER_ROOT: PepperRootStrategy(),
+            #PEPPER_ROOT: TomatoesStrategy(), #PepperRootStrategy(),
             OSMIUM:      OsmiumStrategy(),
             # PICNIC_BASKET1: EtfStrategy(PICNIC_BASKET1, ETF_COMPOSITIONS[PICNIC_BASKET1], 80),
             # PICNIC_BASKET2: EtfStrategy(PICNIC_BASKET2, ETF_COMPOSITIONS[PICNIC_BASKET2], 50),
