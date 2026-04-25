@@ -1171,11 +1171,10 @@ class HydrogelStrategy(MarketMakingStrategy):
       wall != top:     100% of ticks, so wall_mid is the cleaner fair proxy
 
     Main logic:
-      - Use live wall_mid as fair value; do not hard-code 9990.
-      - Market make with _TAKE_EDGE and _MAKE_EDGE.
-      - Add a small adaptive mean-reversion tilt for future regime changes. (Impact on fv)
-
-    Mostly market making (assuming wall_mid is the fair value), and mean reversion is only a small tilt.
+      - Use live wall_mid as the primary fair value; do not hard-code 9990.
+      - Add a small capped mean-reversion tilt toward an adaptive EMA.
+      - Take clear edge, flatten near fair value when possible, then quote passively.
+      - Skew passive quotes away from adding to large inventory.
     """
 
     _TAKE_EDGE = 2
@@ -1187,6 +1186,8 @@ class HydrogelStrategy(MarketMakingStrategy):
     _MEAN_REVERSION_STRENGTH = 0.16
     _MEAN_REVERSION_CAP = 2.0
     _MIN_MEAN_SAMPLES = 20
+    _FLATTEN_EDGE = 2 # official backtest pnl 772, 3 -> 600, without -> 607
+    _FLATTEN_FRACTION = 0.5
 
     def __init__(self) -> None:
         super().__init__(HYDROGEL, take_edge=self._TAKE_EDGE, make_edge=self._MAKE_EDGE)
@@ -1226,6 +1227,10 @@ class HydrogelStrategy(MarketMakingStrategy):
         )
         self._ema_samples += 1
 
+    def _position_after_orders(self, ctx: ProductContext) -> int:
+        """Current position after orders already placed during this tick."""
+        return ctx.position + self._buy_spent - self._sell_spent
+
     def _inventory_skewed_fair_value(self, ctx: ProductContext, fair_value: float) -> float:
         """
         Return the passive quoting fair value after nonlinear inventory skew.
@@ -1238,7 +1243,7 @@ class HydrogelStrategy(MarketMakingStrategy):
         if ctx.limit <= 0:
             return fair_value
 
-        inventory_ratio = ctx.position / ctx.limit
+        inventory_ratio = self._position_after_orders(ctx) / ctx.limit
         abs_ratio = abs(inventory_ratio)
         if abs_ratio <= self._SKEW_DEAD_ZONE:
             return fair_value
@@ -1250,17 +1255,47 @@ class HydrogelStrategy(MarketMakingStrategy):
         )
         return fair_value - skew
 
+    def _near_fair_flatten(self, ctx: ProductContext, fair_value: float) -> None:
+        """
+        Reduce existing inventory when the book offers an exit close to fair value.
+
+        This is risk control, not edge seeking.  It accepts a small price cost so
+        HYDROGEL does not carry a directional position for too long.
+        """
+        if self._book is None:
+            return
+
+        pos_after_orders = self._position_after_orders(ctx)
+        if pos_after_orders == 0:
+            return
+
+        target_qty = max(1, int(abs(pos_after_orders) * self._FLATTEN_FRACTION))
+
+        if pos_after_orders > 0 and self._book.buy_orders:
+            best_bid = max(self._book.buy_orders)
+            if best_bid >= fair_value - self._FLATTEN_EDGE:
+                qty = min(target_qty, pos_after_orders, self._book.buy_orders[best_bid])
+                self.sell(best_bid, qty)
+
+        elif pos_after_orders < 0 and self._book.sell_orders:
+            best_ask = min(self._book.sell_orders)
+            if best_ask <= fair_value + self._FLATTEN_EDGE:
+                qty = min(target_qty, -pos_after_orders, self._book.sell_orders[best_ask])
+                self.buy(best_ask, qty)
+
     def act(self, ctx: ProductContext, state: TradingState) -> None:
         fv = self.get_fair_value(ctx, state)
         if fv is None:
             return
 
-        skewed_fv = self._inventory_skewed_fair_value(ctx, fv)
-
         # Mean reversion is deliberately tiny and capped, so it can inform taking.
-        # Inventory skew remains a quoting preference, not an active-take signal.
+        # Flattening is separate risk control: it exits near fair value when
+        # possible, then passive quotes use the remaining inventory.
         Primitives.take_best_orders(self, ctx, fv, self._TAKE_EDGE)
         Primitives.zero_ev_flush(self, ctx, fv)
+        self._near_fair_flatten(ctx, fv)
+
+        skewed_fv = self._inventory_skewed_fair_value(ctx, fv)
 
         # Passive quotes use the skewed fair value: long inventory lowers our bid
         # and tightens our ask; short inventory does the mirror image.
