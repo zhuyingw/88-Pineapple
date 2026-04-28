@@ -1,1 +1,6 @@
-ying_research/Round_4/backtests/*.log
+# mac
+.DS_Store
+
+# logs
+*.log
+backtests/
