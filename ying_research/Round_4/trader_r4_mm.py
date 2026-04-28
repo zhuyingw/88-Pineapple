@@ -1398,10 +1398,10 @@ class VelvetExtractStrategy(Strategy):
     when their latest direction agrees with the EMA mean-reversion direction.
     This preserves the observed indicator while avoiding stale quote chasing.
 
-    Active parameters correspond to the best nonzero-Mark sweep variant:
-      mr0.20_b0.50_L2_000 → total=105,295 | VELVET=28,417
-    The absolute-best PnL variant was mark0 (total=107,706), retained below
-    as a comment for easy rollback.
+    Market-making-first variant:
+      - price/fair is driven by microprice + EMA mean reversion + inventory skew
+      - Mark 55/67 never move fair directly
+      - Mark signal only nudges quote sizes, so the MM price edge is preserved
     """
     HALF_WIDTH  = 1
     MICRO_COEFF = 0.55
@@ -1414,14 +1414,15 @@ class VelvetExtractStrategy(Strategy):
     EMA_ALPHA       = 0.005
     MIN_EMA_SAMPLES = 60
     MR_COEFF        = 0.20
-    MR_CAP          = 3.0
+    MR_CAP          = 5.0
     MR_DEADZONE     = 0.75
 
     # Short-lived Mark 55/67 confirmation.  Set MARK_BIAS_TICKS=0.0 to keep
     # the indicator/logging without letting it affect quotes (highest PnL sweep).
     INFORMED_MARKS:        Tuple[str, ...] = INFORMED_MARKS_VELVET
     MARK_SIGNAL_LIFETIME:  int   = 2_000
-    MARK_BIAS_TICKS:       float = 0.50
+    MARK_BIAS_TICKS:       float = 0.0
+    MARK_SIZE_MULT:         float = 0.50
 
     def __init__(self) -> None:
         super().__init__(VELVET)
@@ -1492,7 +1493,8 @@ class VelvetExtractStrategy(Strategy):
             - self.INV_SKEW * inv_ratio
         )
 
-        # Use Mark flow only when it agrees with mean reversion.
+        # Keep Mark out of fair-value pricing in this MM-first version.
+        # It only changes quote sizes below.
         mark_used = Signal.NEUTRAL
         if mark_sig == Signal.LONG and mr_dev > self.MR_DEADZONE:
             fair += self.MARK_BIAS_TICKS
@@ -1524,6 +1526,16 @@ class VelvetExtractStrategy(Strategy):
         proj_ratio = projected / ctx.limit if ctx.limit > 0 else 0.0
         bid_size = max(4, int(round(self.BASE_SIZE * (1.0 - max(0.0,  proj_ratio)))))
         ask_size = max(4, int(round(self.BASE_SIZE * (1.0 - max(0.0, -proj_ratio)))))
+
+        if mark_sig == Signal.LONG:
+            bid_size = int(round(bid_size * (2.0 - self.MARK_SIZE_MULT)))
+            ask_size = max(1, int(round(ask_size * self.MARK_SIZE_MULT)))
+            mark_used = Signal.LONG
+        elif mark_sig == Signal.SHORT:
+            bid_size = max(1, int(round(bid_size * self.MARK_SIZE_MULT)))
+            ask_size = int(round(ask_size * (2.0 - self.MARK_SIZE_MULT)))
+            mark_used = Signal.SHORT
+
         bid_size = min(bid_size, ctx.max_buy  - self._buy_spent)
         ask_size = min(ask_size, ctx.max_sell - self._sell_spent)
 

@@ -1414,14 +1414,14 @@ class VelvetExtractStrategy(Strategy):
     EMA_ALPHA       = 0.005
     MIN_EMA_SAMPLES = 60
     MR_COEFF        = 0.20
-    MR_CAP          = 3.0
+    MR_CAP          = 5.0
     MR_DEADZONE     = 0.75
 
     # Short-lived Mark 55/67 confirmation.  Set MARK_BIAS_TICKS=0.0 to keep
     # the indicator/logging without letting it affect quotes (highest PnL sweep).
     INFORMED_MARKS:        Tuple[str, ...] = INFORMED_MARKS_VELVET
     MARK_SIGNAL_LIFETIME:  int   = 2_000
-    MARK_BIAS_TICKS:       float = 0.50
+    MARK_BIAS_TICKS:       float = 0
 
     def __init__(self) -> None:
         super().__init__(VELVET)
